@@ -1,0 +1,34 @@
+# Build output
+/build/
+out/
+*.exe
+*.obj
+*.ilk
+*.pdb
+*.lib
+*.exp
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Logs
+*.log
+
+# Runtime data
+queue/
+mail_root/
+*.lock
+
+# OS / IDE
+.vscode/
+.idea/
+*.user
+*.suo
+*.swp
+
+# Secrets
+config/*.yml
+!config/example.server.yml

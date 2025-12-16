@@ -1,0 +1,16 @@
+server:
+  host: "0.0.0.0"
+  smtp_port: 2525
+  imap_port: 2143
+  domain: "example.com"
+  mail_root: "mail_root"
+
+logging:
+  file: "mailserver.log"
+  level: "info"
+
+auth:
+  users_file: "users.txt"
+
+admin:
+  token: "CHANGE_ME"
