@@ -1,6 +1,7 @@
 #include "spam_engine.h"
 #include "spam_rules.h"
 #include "monitoring/metrics.h"
+#include "threat_intel/intel_feedback.h"
 
 #include <sstream>
 
@@ -20,23 +21,28 @@ std::string SpamResult::buildResultHeader() const {
     return oss.str();
 }
 
-SpamResult SpamEngine::evaluate(const AuthResultsState& auth,
-                                const std::string& headers,
-                                const std::string& body)
-{
+SpamResult SpamEngine::evaluate(
+    const AuthResultsState& auth,
+    const std::string& headers,
+    const std::string& body
+) {
     SpamResult r;
 
     applyAuthRules(r, auth);
     applyHeaderRules(r, headers);
     applyBodyRules(r, body);
 
-    // ✅ Use engine-level threshold
     r.isSpam = (r.totalScore >= requiredScore_);
 
     if (r.isSpam) {
         Metrics::instance().inc("messages_spam_total");
+        if (!auth.dkim.headerDomain.empty()) {
+        IntelFeedback::applySenderIntel(
+            r,
+            auth.dkim.headerDomain
+        );
     }
-
+}
     return r;
 }
 

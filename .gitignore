@@ -32,3 +32,11 @@ mail_root/
 # Secrets
 config/*.yml
 !config/example.server.yml
+
+# Antivirus / local tools
+ClamAV/
+clamd.conf
+freshclam.conf
+*.cvd
+*.cld
+*.log

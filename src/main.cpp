@@ -8,6 +8,10 @@
 #include "monitoring/http_metrics_server.h"
 #include "admin/admin_server.h"
 #include "admin/admin_auth.h"
+#include "virus/sandbox_engine.h"
+#include "virus/sandbox_provider_anyrun.h"
+#include "virus/cloud_scanner.h"
+#include "virus/cloud_provider_virustotal.h"
 // If you have a helper to convert "info"/"debug" strings to LogLevel
 LogLevel logLevelFromString(const std::string& s) {
     if (s == "debug")   return LogLevel::Debug;
@@ -33,6 +37,10 @@ int main() {
         admin.start(8081);
         // 2) Build shared server context (includes MailStore for Phase 3)
         ServerContext ctx(cfg);
+        CloudScanner::instance().addProvider(
+            std::make_unique<VirusTotalProvider>()
+        );
+        SandboxEngine::instance().start();
         if (!ctx.auth.load(cfg.usersFile)) {
             Logger::instance().log(
                 LogLevel::Warn,
@@ -59,6 +67,10 @@ int main() {
         Logger::instance().log(LogLevel::Info, "Press Enter to stop server");
         std::string dummy;
         std::getline(std::cin, dummy);
+        SandboxEngine::instance().addProvider(
+            std::make_unique<AnyRunProvider>()
+        );
+        SandboxEngine::instance().start();
 
         // 5) Stop SMTP server cleanly
         smtp.stop();

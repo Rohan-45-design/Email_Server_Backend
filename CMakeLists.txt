@@ -37,6 +37,22 @@ add_executable(mailserver
     src/admin/admin_auth.cpp
     src/ha/leader_election.cpp
     src/ha/ha_controller.cpp
+    src/antivirus/virus_scanner.cpp    
+    src/virus/cloud_scanner.cpp
+    src/virus/cloud_provider_virustotal.cpp
+    src/virus/sandbox_engine.cpp
+    src/virus/sandbox_provider_anyrun.cpp
+    src/virus/sandbox_verdict_store.cpp
+    src/mime/mime_parser.cpp
+    src/mime/mime_decoder.cpp
+    src/policy/attachment_policy.cpp
+    src/virus/cloud_scan_worker.cpp
+    src/virus/virus_verdict_store.cpp
+    src/retro/retro_manager.cpp
+    src/threat_intel/hash_reputation.cpp
+    src/threat_intel/intel_feedback.cpp
+    src/threat_intel/ioc_store.cpp
+    src/threat_intel/sender_reputation.cpp
 )
 
 # Project headers
@@ -53,6 +69,7 @@ target_link_libraries(mailserver PRIVATE
     "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD/libcrypto.lib"
     ws2_32
 )
+
 
 # -------------------- yaml-cpp --------------------
 find_package(yaml-cpp REQUIRED)

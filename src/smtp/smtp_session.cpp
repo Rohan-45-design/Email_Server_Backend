@@ -4,6 +4,9 @@
 #include "core/logger.h"
 #include "core/auth_manager.h"
 #include "monitoring/metrics.h"
+#include "antivirus/virus_scanner.h"
+#include "mime/mime_parser.h"
+#include "policy/attachment_policy.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <vector>
@@ -176,6 +179,13 @@ void SmtpSession::handleRcptTo(const std::string& args) {
     rcptTo_ = args;
     sendLine("250 OK");
 }
+static std::string extractAddress(const std::string& s) {
+    auto start = s.find('<');
+    auto end   = s.find('>');
+    if (start != std::string::npos && end != std::string::npos && end > start)
+        return s.substr(start + 1, end - start - 1);
+    return s;
+}
 
 void SmtpSession::handleData() {
     if (mailFrom_.empty() || rcptTo_.empty()) {
@@ -231,7 +241,7 @@ void SmtpSession::handleData() {
     din.dkimPass   = (authResults_.dkim.result == DkimResult::Pass);
     din.dkimDomain = authResults_.dkim.headerDomain;
 
-authResults_.dmarc = dmarcEval.evaluate(din);
+    authResults_.dmarc = dmarcEval.evaluate(din);
 
     // Authentication-Results header
     std::string authHeader = "Authentication-Results: " +
@@ -240,12 +250,74 @@ authResults_.dmarc = dmarcEval.evaluate(din);
     // Prepend it
     std::string newHeaders = authHeader + "\r\n" + headers;
     std::string finalRaw = newHeaders + "\r\n\r\n" + body;
+    // ---- VIRUS SCAN (Phase 1: ClamAV) ----
+    auto scanResult = VirusScanner::scan(finalRaw);
 
-    // Store message
+    if (scanResult.unavailable) {
+        Logger::instance().log(
+            LogLevel::Error,
+            "Virus scanner unavailable"
+        );
+        Metrics::instance().inc("virus_scanner_unavailable_total");
+        sendLine("451 Temporary failure, virus scanner unavailable");
+        return;
+    }
+
+    if (scanResult.infected) {
+        Logger::instance().log(
+            LogLevel::Warn,
+            "Virus detected: " + scanResult.virusName
+        );
+        Metrics::instance().inc("messages_virus_rejected_total");
+        sendLine("550 Message rejected due to virus detection");
+        return;
+    }
+    // ---------------- MIME PARSING (RFC-compliant) ----------------
+    MimeMessage mime = MimeParser::parse(finalRaw);
+
+    std::vector<std::string> filenames;
+    for (const auto& part : mime.root.children) {
+        auto name = part.filename();
+        if (!name.empty()) {
+            filenames.push_back(name);
+        }
+    }
+    // ---- PHASE 4: ATTACHMENT POLICY ----
+    std::vector<AttachmentMeta> attachments;
+    for (const auto& name : filenames) {
+        attachments.push_back({
+            name,
+            "",
+            false,
+            false
+        });
+    }
+
+    PolicyResult policy = AttachmentPolicy::evaluate(attachments);
+
+    if (policy.verdict == PolicyVerdict::Reject) {
+        Logger::instance().log(
+            LogLevel::Warn,
+            "Message rejected by attachment policy: " + policy.reason
+        );
+        sendLine("550 Message rejected: " + policy.reason);
+        return;
+    }
+
+    if (policy.verdict == PolicyVerdict::Quarantine) {
+        Logger::instance().log(
+            LogLevel::Info,
+            "Message quarantined by attachment policy: " + policy.reason
+        );
+        // mark as spam / quarantine
+    }
+
+
+
     StoredMessage msg;
-    msg.id = "";
-    msg.from = mailFrom_;
-    msg.recipients = { rcptTo_ };
+    msg.id = std::to_string(std::time(nullptr)) + "-" + std::to_string(rand());
+    msg.from = extractAddress(mailFrom_);
+    msg.recipients = { extractAddress(rcptTo_) };
     msg.rawData = finalRaw;
     msg.mailboxUser = username_.empty() ? rcptTo_ : username_;
 

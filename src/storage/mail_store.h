@@ -19,6 +19,11 @@ public:
 
     // Store message on disk; returns message id or empty string on failure
     std::string store(const StoredMessage& msg);
+    bool moveToQuarantine(const std::string& user,
+                      const std::string& id);
+
+    bool deleteMessage(const std::string& user,
+                   const std::string& id);
 
 private:
     std::string rootDir_;           // base: e.g. "data/mail"
@@ -32,4 +37,5 @@ private:
                                 const std::string& id) const;
 
     bool ensureDirExists(const std::string& dir) const;
+
 };

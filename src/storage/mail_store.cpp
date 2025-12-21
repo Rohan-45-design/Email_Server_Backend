@@ -37,6 +37,40 @@ std::string MailStore::makeMessagePath(const std::string& user,
                                        const std::string& id) const {
     return (fs::path(makeUserInboxDir(user)) / (id + ".eml")).string();
 }
+bool MailStore::moveToQuarantine(const std::string& user,
+                                 const std::string& id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    fs::path src = makeMessagePath(user, id);
+    fs::path dst = fs::path(rootDir_) / user / "Quarantine" / (id + ".eml");
+
+    try {
+        fs::create_directories(dst.parent_path());
+        fs::rename(src, dst);
+        Logger::instance().log(
+            LogLevel::Warn,
+            "MailStore: quarantined message " + id);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool MailStore::deleteMessage(const std::string& user,
+                              const std::string& id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    fs::path p = makeMessagePath(user, id);
+    try {
+        fs::remove(p);
+        Logger::instance().log(
+            LogLevel::Warn,
+            "MailStore: deleted message " + id);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 std::string MailStore::store(const StoredMessage& msg) {
     std::lock_guard<std::mutex> lock(mutex_);
