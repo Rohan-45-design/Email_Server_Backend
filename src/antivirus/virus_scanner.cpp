@@ -1,17 +1,17 @@
 #include "virus_scanner.h"
 #include "core/logger.h"
-
+#include <chrono>  // ← ADDED
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
-
 #pragma comment(lib, "Ws2_32.lib")
 
 VirusScanResult VirusScanner::scan(const std::string& raw) {
+    auto scan_start = std::chrono::steady_clock::now();  // ← NEW TIMING
+    
     VirusScanResult r;
-
     WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         r.unavailable = true;
         return r;
     }
@@ -37,18 +37,17 @@ VirusScanResult VirusScanner::scan(const std::string& raw) {
 
     std::string cmd = "zINSTREAM\0";
     send(sock, cmd.c_str(), cmd.size(), 0);
-
-    uint32_t len = htonl((uint32_t)raw.size());
+    
+    uint32_t len = htonl(static_cast<uint32_t>(raw.size()));
     send(sock, (char*)&len, 4, 0);
     send(sock, raw.c_str(), raw.size(), 0);
-
+    
     uint32_t zero = 0;
     send(sock, (char*)&zero, 4, 0);
 
-    char buf[1024]{};
-    recv(sock, buf, sizeof(buf), 0);
-
-    std::string reply(buf);
+    char buf[1024];
+    int received = recv(sock, buf, sizeof(buf), 0);
+    std::string reply(buf, received);
 
     if (reply.find("FOUND") != std::string::npos) {
         r.infected = true;
@@ -61,5 +60,10 @@ VirusScanResult VirusScanner::scan(const std::string& raw) {
 
     closesocket(sock);
     WSACleanup();
+    
+    auto scan_end = std::chrono::steady_clock::now();      // ← NEW TIMING
+    auto duration_ms = std::chrono::duration<double, std::milli>(scan_end - scan_start).count();
+    Logger::instance().observe_virus_scan(duration_ms);    // ← NEW METRIC
+    
     return r;
 }

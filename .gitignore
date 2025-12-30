@@ -1,42 +1,57 @@
-# Build output
-/build/
-out/
+# Build artifacts
+build/
 *.exe
-*.obj
-*.ilk
-*.pdb
+*.dll
+*.so
+*.a
 *.lib
+*.obj
+*.o
+*.pdb
+*.ilk
 *.exp
 
 # CMake
-CMakeFiles/
 CMakeCache.txt
+CMakeFiles/
 cmake_install.cmake
-Makefile
+*.cmake
+!CMakeLists.txt
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.user
+*.suo
 
 # Logs
 *.log
+mailserver.log
 
-# Runtime data
-queue/
-mail_root/
-*.lock
+# Data directories (may contain sensitive data)
+data/mail/
+data/*.db
+data/*.sqlite
 
-# OS / IDE
-.vscode/
-.idea/
-*.user
-*.suo
-*.swp
-
-# Secrets
-config/*.yml
+# Config files with secrets (keep example files)
+config/server.yml
+config/users.yml
 !config/example.server.yml
 
-# Antivirus / local tools
-ClamAV/
-clamd.conf
-freshclam.conf
-*.cvd
-*.cld
-*.log
+# Environment files
+.env
+.env.local
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*~

@@ -7,17 +7,20 @@ Metrics& Metrics::instance() {
 }
 
 void Metrics::inc(const std::string& name, int value) {
-    counters_[name] += value;
+    std::lock_guard<std::mutex> lk(mutex_);
+    counters[name] += value;
 }
 
 void Metrics::set(const std::string& name, int value) {
-    counters_[name] = value;
+    std::lock_guard<std::mutex> lk(mutex_);
+    counters[name] = value;
 }
 
 std::string Metrics::renderPrometheus() const {
     std::ostringstream out;
-    for (const auto& [name, val] : counters_) {
-        out << name << " " << val.load() << "\n";
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (const auto& p : counters) {
+        out << p.first << " " << p.second << "\n";
     }
     return out.str();
 }

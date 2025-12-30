@@ -16,7 +16,12 @@ ServerConfig ConfigLoader::loadFromFile(const std::string& path) {
             if (s["smtp_port"])  cfg.smtpPort = s["smtp_port"].as<int>();
             if (s["imap_port"])  cfg.imapPort = s["imap_port"].as<int>();
             if (s["domain"])     cfg.domain   = s["domain"].as<std::string>();
-            if (s["mail_root"])  cfg.mailRoot = s["mail_root"].as<std::string>(); // NEW
+            if (s["mail_root"])  cfg.mailRoot = s["mail_root"].as<std::string>();
+            if (s["tls_cert"])   cfg.tlsCertFile = s["tls_cert"].as<std::string>();
+            if (s["tls_key"])    cfg.tlsKeyFile  = s["tls_key"].as<std::string>();
+            if (s["tls_required"]) cfg.tlsRequired = s["tls_required"].as<bool>();
+            if (s["require_starttls"]) cfg.requireStartTls = s["require_starttls"].as<bool>();
+            if (s["min_tls_version"]) cfg.minTlsVersion = s["min_tls_version"].as<int>();
         }
 
         if (root["logging"]) {

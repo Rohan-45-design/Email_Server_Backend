@@ -1,18 +1,28 @@
+// ha/ha_controller.h
 #pragma once
-#include "ha/leader_election.h"
 #include <thread>
 #include <atomic>
+#include <memory>
+#include <string>
+class LeaderElection;
 
 class HaController {
 public:
-    HaController();
+    explicit HaController(const std::string& dataDir);
+    ~HaController();
+
     void start();
     void stop();
+
+    bool isLeader() const;
 
 private:
     void run();
 
-    LeaderElection election_;
-    std::thread thread_;
+    std::string dataDir_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> leader_{false};
+
+    std::unique_ptr<LeaderElection> election_;
+    std::thread thread_;
 };

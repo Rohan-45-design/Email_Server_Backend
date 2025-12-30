@@ -3,11 +3,20 @@
 
 class LeaderElection {
 public:
-    explicit LeaderElection(const std::string& lockFile);
+    explicit LeaderElection(const std::string& lockPath);
+    ~LeaderElection();
+
     bool tryBecomeLeader();
     bool isLeader() const;
+    void releaseLeadership();
 
 private:
-    std::string lockFile_;
-    bool leader_ = false;
+    std::string lockPath_;
+    bool leader_{false};
+
+#ifdef _WIN32
+    void* handle_{nullptr};
+#else
+    int fd_{-1};
+#endif
 };

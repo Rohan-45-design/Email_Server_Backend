@@ -1,7 +1,8 @@
 #pragma once
 #include <atomic>
 #include <string>
-#include <map>
+#include <unordered_map>
+#include <mutex>
 
 class Metrics {
 public:
@@ -14,5 +15,7 @@ public:
 
 private:
     Metrics() = default;
-    mutable std::map<std::string, std::atomic<int>> counters_;
+    mutable std::mutex mutex_;
+    // use a simple int64 map guarded by mutex for thread-safety
+    mutable std::unordered_map<std::string, int64_t> counters;
 };

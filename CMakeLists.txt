@@ -9,12 +9,23 @@ add_executable(mailserver
     src/core/server_context.cpp
     src/core/config_loader.cpp
     src/core/logger.cpp
+    src/core/tls_context.cpp
+    src/core/password_hash.cpp
+    src/core/audit_log.cpp
+    src/core/input_validator.cpp
+    src/core/app_lifecycle.cpp
+    src/core/shutdown_coordinator.cpp
+    src/core/crash_containment.cpp
+    src/core/tls_enforcement.cpp
+    src/core/connection_manager.cpp
+    src/core/readiness_state.cpp
     src/smtp/smtp_server.cpp
     src/smtp/smtp_session.cpp
     src/storage/mail_store.cpp
     src/imap/imap_server.cpp
     src/imap/imap_session.cpp
     src/core/auth_manager.cpp
+    src/core/rate_limiter.cpp
     src/imap/flags_index.cpp
     src/antispam/dkim_canon.cpp
     src/antispam/dkim_signer.cpp
@@ -55,22 +66,30 @@ add_executable(mailserver
     src/threat_intel/sender_reputation.cpp
 )
 
-# Project headers
-target_include_directories(mailserver PRIVATE
-    src
-)
+target_include_directories(mailserver PRIVATE src)
 
-# -------------------- OpenSSL (DKIM REQUIRED) --------------------
-target_include_directories(mailserver PRIVATE
-    "C:/Program Files/OpenSSL-Win64/include"
-)
+# -------------------- OpenSSL (TLS + DKIM REQUIRED) --------------------
+find_package(OpenSSL REQUIRED)
+if(OpenSSL_FOUND)
+    target_include_directories(mailserver PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(mailserver PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+else()
+    message(FATAL_ERROR "OpenSSL not found - please install OpenSSL development libraries")
+endif()
 
-target_link_libraries(mailserver PRIVATE
-    "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD/libcrypto.lib"
-    ws2_32
-)
+# Link Winsock on Windows
+if(WIN32)
+    target_link_libraries(mailserver PRIVATE ws2_32)
+endif()
 
-
-# -------------------- yaml-cpp --------------------
+# yaml-cpp + json (unchanged)
 find_package(yaml-cpp REQUIRED)
 target_link_libraries(mailserver PRIVATE yaml-cpp)
+
+include(FetchContent)
+FetchContent_Declare(
+    json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+)
+FetchContent_MakeAvailable(json)
+target_link_libraries(mailserver PRIVATE nlohmann_json::nlohmann_json)
