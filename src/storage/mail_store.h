@@ -38,4 +38,10 @@ private:
 
     bool ensureDirExists(const std::string& dir) const;
 
+    // CRITICAL FIX: Atomic write with fsync for crash safety
+    bool atomicWriteFile(const std::string& path, const std::string& content);
+
+    // CRITICAL FIX: Recovery of orphaned temp files
+    void recoverOrphanedTempFiles();
+
 };

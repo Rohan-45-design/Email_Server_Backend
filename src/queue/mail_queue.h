@@ -5,12 +5,15 @@
 #include <memory>
 #include <mutex>
 #include <algorithm>
+#include <chrono>
 struct QueueMessage {
     std::string id;
     std::string from;
     std::string to;
     std::string rawData;
     int retryCount = 0;
+    std::chrono::system_clock::time_point enqueuedAt;
+    std::chrono::system_clock::time_point nextRetryAt;
 };
 
 class MailQueue {
@@ -42,4 +45,7 @@ private:
     static std::mutex queueMutex_;
     static std::vector<std::shared_ptr<QueueMessage>> retryQueue_;
     static std::vector<std::shared_ptr<QueueMessage>> inflightQueue_;
+
+    // CRITICAL FIX: Recovery of orphaned temp files
+    void recoverOrphanedTempFiles();
 };

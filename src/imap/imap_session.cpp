@@ -164,7 +164,7 @@ void ImapSession::handleLogin(const std::string& tag, const std::string& args) {
         return;
     }
         
-    if (context_.auth.validate(user, pass)) {
+    if (context_.getAuthManager().validate(user, pass)) {
         authed_ = true;
         username_ = user;
         sendLine(tag + " OK LOGIN completed");

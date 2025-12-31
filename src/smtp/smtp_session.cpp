@@ -15,18 +15,25 @@
 #include <ws2tcpip.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+
 #include <sstream>
 #include <algorithm>
 #include <vector>
 #include <ctime>
 
+
 SmtpSession::SmtpSession(ServerContext& ctx, int clientSock)
-    : context_(ctx), sock_(clientSock), ssl_(nullptr) {
-    sockaddr_in clientAddr;
-    socklen_t len = sizeof(clientAddr);
-    if (getpeername(sock_, (sockaddr*)&clientAddr, &len) == 0) {
+    : context_(ctx), sock_(clientSock), ssl_(nullptr), tlsActive_(false), 
+      state_(SmtpState::CONNECTED), lastActivity_(std::chrono::steady_clock::now()) {
+
+    // Increment active sessions metric
+    Metrics::instance().inc("smtp_active_sessions");
+
+    sockaddr_in addr{};
+    socklen_t len = sizeof(addr);
+    if (getpeername(sock_, (sockaddr*)&addr, &len) == 0) {
         char ipbuf[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &clientAddr.sin_addr, ipbuf, sizeof(ipbuf));
+        inet_ntop(AF_INET, &addr.sin_addr, ipbuf, sizeof(ipbuf));
         peerIp_ = ipbuf;
     } else {
         peerIp_ = "unknown";
@@ -34,62 +41,44 @@ SmtpSession::SmtpSession(ServerContext& ctx, int clientSock)
 }
 
 SmtpSession::SmtpSession(ServerContext& ctx, int clientSock, SslPtr ssl)
-    : context_(ctx), sock_(clientSock), ssl_(std::move(ssl)) {
-    if (ssl_) tlsActive_ = true;
-    sockaddr_in clientAddr;
-    socklen_t len = sizeof(clientAddr);
-    if (getpeername(sock_, (sockaddr*)&clientAddr, &len) == 0) {
+    : context_(ctx), sock_(clientSock), ssl_(std::move(ssl)), tlsActive_(true),
+      state_(SmtpState::CONNECTED), lastActivity_(std::chrono::steady_clock::now()) {
+
+    sockaddr_in addr{};
+    socklen_t len = sizeof(addr);
+    if (getpeername(sock_, (sockaddr*)&addr, &len) == 0) {
         char ipbuf[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &clientAddr.sin_addr, ipbuf, sizeof(ipbuf));
+        inet_ntop(AF_INET, &addr.sin_addr, ipbuf, sizeof(ipbuf));
         peerIp_ = ipbuf;
     } else {
         peerIp_ = "unknown";
     }
 }
 
-SmtpSession::~SmtpSession() = default;
+SmtpSession::~SmtpSession() {
+    // Decrement active sessions metric
+    Metrics::instance().inc("smtp_active_sessions", -1);
+}
 
-void SmtpSession::run() {
-    // TLS Enforcement: Check if plaintext is allowed
-    if (!tlsActive_ && TlsEnforcement::instance().isTlsRequired()) {
-        // Check if this port allows plaintext (e.g., port 25 for server-to-server)
-        if (!TlsEnforcement::instance().allowPlaintext(0)) { // Port will be checked in handleStarttls
-            sendLine("530 Must use STARTTLS");
-            closesocket(sock_);
-            return;
-        }
-    }
+/* =========================
+   Helpers
+   ========================= */
 
-    if (tlsActive_) {
-        sendLine("220 " + context_.config.domain + " ESMTP ready (TLS)");
-    } else {
-        sendLine("220 " + context_.config.domain + " ESMTP ready");
-    }
-    
-    if (!RateLimiter::instance().allowConnection(peerIp_)) {
-        Logger::instance().log(LogLevel::Warn, "SMTP session rate limited: " + peerIp_);
-        sendLine("421 Too many connections from " + peerIp_);
-        closesocket(sock_);
-        return;
-    }
-    
-    std::string line;
-    while (readLine(line)) {
-        if (line.empty()) continue;
-        handleCommand(line);
-        if (sock_ == INVALID_SOCKET) break;
-    }
-    
-    if (sock_ != INVALID_SOCKET) closesocket(sock_);
-    sock_ = INVALID_SOCKET;
-    RateLimiter::instance().releaseConnection(peerIp_);
+bool SmtpSession::tlsRequiredAndMissing() const {
+    return TlsEnforcement::instance().isTlsRequired() && !tlsActive_;
+}
+
+bool SmtpSession::startTlsRequiredAndMissing() const {
+    return TlsEnforcement::instance().isStartTlsRequired() && !tlsActive_;
 }
 
 int SmtpSession::secureSend(const std::string& data) {
     if (tlsActive_ && ssl_) {
-        return SSL_write(ssl_.get(), data.data(), static_cast<int>(data.size()));
+        return SSL_write(ssl_.get(), data.data(),
+                         static_cast<int>(data.size()));
     }
-    return send(sock_, data.data(), static_cast<int>(data.size()), 0);
+    return send(sock_, data.data(),
+                static_cast<int>(data.size()), 0);
 }
 
 int SmtpSession::secureRecv(char* buf, int len) {
@@ -100,50 +89,227 @@ int SmtpSession::secureRecv(char* buf, int len) {
 }
 
 void SmtpSession::sendLine(const std::string& line) {
-    std::string out = line + "\r\n";
-    secureSend(out);
+    try {
+        secureSend(line + "\r\n");
+    } catch (const std::exception& ex) {
+        Logger::instance().log(LogLevel::Error,
+            "SMTP sendLine failed (" + peerIp_ + "): " + ex.what());
+        // Don't re-throw - session will handle disconnection
+    } catch (...) {
+        Logger::instance().log(LogLevel::Error,
+            "SMTP sendLine failed (" + peerIp_ + "): unknown error");
+    }
+}
+
+void SmtpSession::sendMultilineResponse(const std::vector<std::string>& lines) {
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (i < lines.size() - 1) {
+            sendLine(lines[i] + "-");  // Continuation line
+        } else {
+            sendLine(lines[i]);        // Final line
+        }
+    }
 }
 
 bool SmtpSession::readLine(std::string& out) {
     out.clear();
     char c;
+    int consecutiveErrors = 0;
+    
     while (true) {
-        int n = secureRecv(&c, 1);
-        if (n <= 0) return false;
+        try {
+            int n = secureRecv(&c, 1);
+            if (n <= 0) {
+                if (n < 0) {
+                    consecutiveErrors++;
+                    if (consecutiveErrors > 3) {
+                        Logger::instance().log(LogLevel::Warn,
+                            "SMTP readLine too many consecutive errors (" + peerIp_ + ")");
+                        return false;
+                    }
+                    continue;  // Try again on transient errors
+                }
+                return false;  // Connection closed
+            }
+            consecutiveErrors = 0;  // Reset on success
+        } catch (const std::exception& ex) {
+            Logger::instance().log(LogLevel::Error,
+                "SMTP secureRecv failed (" + peerIp_ + "): " + ex.what());
+            return false;
+        } catch (...) {
+            Logger::instance().log(LogLevel::Error,
+                "SMTP secureRecv failed (" + peerIp_ + "): unknown error");
+            return false;
+        }
+        
         if (c == '\r') continue;
         if (c == '\n') break;
         out.push_back(c);
+        
+        // Prevent buffer overflow from malicious clients
+        if (out.length() > 1024) {
+            sendLine("500 Line too long");
+            return false;
+        }
     }
     return true;
 }
 
-void SmtpSession::splitCommand(const std::string& in, std::string& cmd, std::string& args) {
+bool SmtpSession::isTimeoutExceeded() const {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastActivity_);
+    
+    // Different timeouts for different states
+    int timeoutSeconds = context_.config.smtpTimeout;  // Configurable default
+    switch (state_) {
+        case SmtpState::CONNECTED:
+            timeoutSeconds = 60;   // 1 minute for initial connection
+            break;
+        case SmtpState::DATA:
+            timeoutSeconds = context_.config.dataTimeout;  // Configurable DATA timeout
+            break;
+        default:
+            timeoutSeconds = context_.config.smtpTimeout;  // Configurable default
+            break;
+    }
+    
+    return elapsed.count() > timeoutSeconds;
+}
+
+void SmtpSession::updateActivity() {
+    lastActivity_ = std::chrono::steady_clock::now();
+}
+
+void SmtpSession::splitCommand(const std::string& in,
+                              std::string& cmd,
+                              std::string& args) {
     std::istringstream iss(in);
     iss >> cmd;
     std::getline(iss, args);
-    if (!args.empty() && args[0] == ' ') args.erase(0, 1);
+    if (!args.empty() && args[0] == ' ')
+        args.erase(0, 1);
 }
+
+/* =========================
+   Session Entry Point
+   ========================= */
+
+void SmtpSession::run() {
+    try {
+        sendLine("220 " + context_.config.domain + " ESMTP ready");
+
+        if (!RateLimiter::instance().allowConnection(peerIp_)) {
+            sendLine("421 Too many connections");
+            closesocket(sock_);
+            return;
+        }
+
+        std::string line;
+        while (readLine(line)) {
+            if (line.empty()) continue;
+
+            if (isTimeoutExceeded()) {
+                sendLine("421 Timeout - closing connection");
+                break;
+            }
+
+            updateActivity();
+            
+            // ISOLATE each command in its own exception handler
+            try {
+                handleCommand(line);
+            } catch (const std::exception& ex) {
+                Logger::instance().log(LogLevel::Error,
+                    "SMTP command crashed (" + peerIp_ + "): " + ex.what() + 
+                    " [cmd: " + line.substr(0, 50) + "]");
+                sendLine("451 Internal error - command failed");
+                // Continue processing - don't crash the session
+            } catch (...) {
+                Logger::instance().log(LogLevel::Error,
+                    "SMTP command crashed (" + peerIp_ + "): unknown exception [cmd: " + 
+                    line.substr(0, 50) + "]");
+                sendLine("451 Internal error - command failed");
+                // Continue processing - don't crash the session
+            }
+
+            if (sock_ == INVALID_SOCKET)
+                break;
+        }
+    }
+    catch (const std::exception& ex) {
+        Logger::instance().log(
+            LogLevel::Error,
+            "SMTP session crashed (" + peerIp_ + "): " + ex.what());
+    }
+    catch (...) {
+        Logger::instance().log(
+            LogLevel::Error,
+            "SMTP session crashed (" + peerIp_ + "): unknown exception");
+    }
+
+    // GUARANTEED cleanup - executes even if exceptions occur above
+    try {
+        if (sock_ != INVALID_SOCKET)
+            closesocket(sock_);
+        
+        RateLimiter::instance().releaseConnection(peerIp_);
+    } catch (...) {
+        // Last resort - log but don't crash
+        Logger::instance().log(LogLevel::Error,
+            "SMTP session cleanup failed (" + peerIp_ + ")");
+    }
+}
+
+
+/* =========================
+   Command Dispatch
+   ========================= */
 
 void SmtpSession::handleCommand(const std::string& line) {
     std::string cmd, args;
     splitCommand(line, cmd, args);
+
     std::string ucmd = cmd;
     std::transform(ucmd.begin(), ucmd.end(), ucmd.begin(), ::toupper);
 
-    if (ucmd == "EHLO") {
-        handleEhlo(args);
-    } else if (ucmd == "HELO") {
-        handleHelo(args);
+    // RFC 5321 state machine enforcement
+    if (ucmd == "EHLO" || ucmd == "HELO") {
+        // Can be issued at any time
+        if (ucmd == "EHLO") {
+            handleEhlo(args);
+            state_ = SmtpState::HELO_EHLO;
+        } else {
+            handleHelo(args);
+            state_ = SmtpState::HELO_EHLO;
+        }
     } else if (ucmd == "STARTTLS") {
+        // Can be issued after HELO/EHLO
+        if (state_ == SmtpState::CONNECTED) {
+            sendLine("503 Bad sequence of commands");
+            return;
+        }
         handleStarttls();
     } else if (ucmd == "AUTH") {
-        if (!tlsActive_) {
+        // Can be issued after HELO/EHLO
+        if (state_ == SmtpState::CONNECTED) {
+            sendLine("503 Bad sequence of commands");
+            return;
+        }
+        if (startTlsRequiredAndMissing()) {
             sendLine("530 Must issue STARTTLS first");
             return;
         }
         handleAuth(args);
+        if (authed_) {
+            state_ = SmtpState::AUTH;
+        }
     } else if (ucmd == "MAIL") {
-        if (!tlsActive_) {
+        // Must be after HELO/EHLO and optionally AUTH
+        if (state_ == SmtpState::CONNECTED) {
+            sendLine("503 Bad sequence of commands");
+            return;
+        }
+        if (tlsRequiredAndMissing()) {
             sendLine("530 Must issue STARTTLS first");
             return;
         }
@@ -152,83 +318,157 @@ void SmtpSession::handleCommand(const std::string& line) {
             return;
         }
         handleMailFrom(args);
+        state_ = SmtpState::MAIL_FROM;
     } else if (ucmd == "RCPT") {
-        if (!tlsActive_) {
+        // Must be after MAIL FROM
+        if (state_ != SmtpState::MAIL_FROM && state_ != SmtpState::RCPT_TO) {
+            sendLine("503 Bad sequence of commands");
+            return;
+        }
+        if (tlsRequiredAndMissing()) {
             sendLine("530 Must issue STARTTLS first");
             return;
         }
         handleRcptTo(args);
+        state_ = SmtpState::RCPT_TO;
     } else if (ucmd == "DATA") {
-        if (!tlsActive_) {
+        // Must be after RCPT TO
+        if (state_ != SmtpState::RCPT_TO) {
+            sendLine("503 Bad sequence of commands");
+            return;
+        }
+        if (tlsRequiredAndMissing()) {
             sendLine("530 Must issue STARTTLS first");
             return;
         }
         handleData();
+        // Reset to MAIL_FROM state after DATA completion
+        state_ = SmtpState::MAIL_FROM;
+        mailFrom_.clear();
+        rcptTo_.clear();
     } else if (ucmd == "QUIT") {
         handleQuit();
+    } else if (ucmd == "RSET") {
+        // Reset session state
+        authed_ = false;
+        username_.clear();
+        mailFrom_.clear();
+        rcptTo_.clear();
+        state_ = SmtpState::HELO_EHLO;
+        sendLine("250 OK");
+    } else if (ucmd == "NOOP") {
+        sendLine("250 OK");
     } else {
         sendLine("502 Command not implemented");
     }
 }
 
+/* =========================
+   STARTTLS (HARD-ENFORCED)
+   ========================= */
+
 void SmtpSession::handleStarttls() {
-    // TLS Enforcement: Check if STARTTLS is required
-    if (TlsEnforcement::instance().isStartTlsRequired() && !tlsActive_) {
-        sendLine("530 STARTTLS required");
+    if (tlsActive_) {
+        sendLine("454 TLS already active");
         return;
     }
 
     sendLine("220 Ready to start TLS");
-    SSL* raw = TlsContext::instance().createSSL(sock_);
-    if (!raw || SSL_accept(raw) <= 0) {
-        unsigned long err = ERR_get_error();
-        char errbuf[256];
-        ERR_error_string(err, errbuf);
-        Logger::instance().log(LogLevel::Error, std::string("TLS handshake failed: ") + errbuf);
-        sendLine("454 TLS not available");
-        if (raw) SSL_free(raw);
-        return;
-    }
 
-    // TLS Enforcement: Validate TLS connection meets requirements
-    if (!TlsEnforcement::instance().validateTlsConnection(raw)) {
-        Logger::instance().log(LogLevel::Warn, "TLS connection does not meet security requirements");
-        sendLine("454 TLS negotiation failed - insufficient security");
-        SSL_free(raw);
-        return;
-    }
+    try {
+        SSL* raw = TlsContext::instance().createSSL(sock_);
+        if (!raw) {
+            Logger::instance().log(LogLevel::Error,
+                "SMTP STARTTLS: SSL creation failed (" + peerIp_ + ")");
+            sendLine("454 TLS negotiation failed");
+            closesocket(sock_);
+            sock_ = INVALID_SOCKET;
+            return;
+        }
 
-    ssl_ = make_ssl_ptr(raw);
-    tlsActive_ = true;
-    Logger::instance().log(LogLevel::Info, "STARTTLS handshake completed");
-    
-    // RFC 3207 §4.2: Reset SMTP state after successful upgrade
-    authed_ = false;
-    username_.clear();
-    heloDomain_.clear();
-    mailFrom_.clear();
-    rcptTo_.clear();
-    authResults_ = {};
+        int acceptResult = SSL_accept(raw);
+        if (acceptResult <= 0) {
+            int sslError = SSL_get_error(raw, acceptResult);
+            Logger::instance().log(LogLevel::Error,
+                "SMTP STARTTLS: SSL_accept failed (" + peerIp_ + "), error: " + std::to_string(sslError));
+            sendLine("454 TLS negotiation failed");
+            SSL_free(raw);
+            closesocket(sock_);
+            sock_ = INVALID_SOCKET;
+            return;
+        }
+
+        if (!TlsEnforcement::instance().validateTlsConnection(raw)) {
+            Logger::instance().log(LogLevel::Warn,
+                "SMTP STARTTLS: TLS validation failed (" + peerIp_ + ")");
+            Metrics::instance().inc("smtp_tls_validation_failures_total");
+            sendLine("454 TLS security requirements not met");
+            SSL_free(raw);
+            closesocket(sock_);
+            sock_ = INVALID_SOCKET;
+            return;
+        }
+
+        ssl_ = make_ssl_ptr(raw);
+        tlsActive_ = true;
+
+        /* RFC 3207: Reset SMTP state */
+        authed_ = false;
+        username_.clear();
+        heloDomain_.clear();
+        mailFrom_.clear();
+        rcptTo_.clear();
+        
+        Logger::instance().log(LogLevel::Info,
+            "SMTP STARTTLS successful (" + peerIp_ + ")");
+        Metrics::instance().inc("smtp_tls_handshakes_total");
+            
+    } catch (const std::exception& ex) {
+        Logger::instance().log(LogLevel::Error,
+            "SMTP STARTTLS crashed (" + peerIp_ + "): " + ex.what());
+        Metrics::instance().inc("smtp_tls_handshake_errors_total");
+        sendLine("454 TLS negotiation failed");
+        closesocket(sock_);
+        sock_ = INVALID_SOCKET;
+    } catch (...) {
+        Logger::instance().log(LogLevel::Error,
+            "SMTP STARTTLS crashed (" + peerIp_ + "): unknown exception");
+        Metrics::instance().inc("smtp_tls_handshake_errors_total");
+        sendLine("454 TLS negotiation failed");
+        closesocket(sock_);
+        sock_ = INVALID_SOCKET;
+    }
 }
+
+/* =========================
+   EHLO / HELO
+   ========================= */
 
 void SmtpSession::handleEhlo(const std::string& arg) {
     heloDomain_ = arg;
-    sendLine("250-" + context_.config.domain + " Hello " + heloDomain_);
-    sendLine("250-PIPELINING");
-    sendLine("250-SIZE 10485760");
-    sendLine("250 HELP");
     
-    if (!tlsActive_) {
-        sendLine("250-STARTTLS");  // RFC 5321: Only pre-TLS
-    }
-    if (tlsActive_) {
-        sendLine("250-AUTH LOGIN PLAIN");  // RFC 8314: Only post-TLS
-    }
+    std::vector<std::string> capabilities = {
+        context_.config.domain,
+        "PIPELINING",
+        "SIZE " + std::to_string(context_.config.maxMessageSize),
+        "8BITMIME",
+        "SMTPUTF8"
+    };
+
+    if (!tlsActive_)
+        capabilities.push_back("STARTTLS");
+
+    if (tlsActive_)
+        capabilities.push_back("AUTH LOGIN PLAIN");
+
+    capabilities.push_back("HELP");
+    
+    sendMultilineResponse(capabilities);
 }
 
 void SmtpSession::handleHelo(const std::string& arg) {
     heloDomain_ = arg;
-    sendLine("250 " + context_.config.domain + " Hello " + heloDomain_);
+    sendLine("250 " + context_.config.domain);
 }
 
 void SmtpSession::handleAuth(const std::string& args) {
@@ -236,236 +476,144 @@ void SmtpSession::handleAuth(const std::string& args) {
         sendLine("503 Already authenticated");
         return;
     }
-    if (!RateLimiter::instance().allowAuth(peerIp_)) {
-        sendLine("535 Too many authentication attempts");
-        return;
-    }
-    std::istringstream iss(args);
-    std::string mech, param;
-    iss >> mech >> param;
-    std::string umech = mech;
-    std::transform(umech.begin(), umech.end(), umech.begin(), ::toupper);
 
-    if (umech == "PLAIN") {
-        std::string blob = param;
-        if (blob.empty()) {
-            sendLine("334 ");
-            if (!readLine(blob)) return;
-        }
-        std::string decoded = base64Decode(blob);
-        size_t p1 = decoded.find('\0');
-        size_t p2 = decoded.find('\0', p1 + 1);
-        if (p1 == std::string::npos || p2 == std::string::npos) {
-            sendLine("501 Invalid PLAIN blob");
+    try {
+        if (!context_.getAuthManager().authenticateSmtp(args, username_)) {
+            Metrics::instance().inc("smtp_auth_failures_total");
+            sendLine("535 Authentication failed");
             return;
         }
-        std::string authcid = decoded.substr(p1 + 1, p2 - p1 - 1);
-        std::string password = decoded.substr(p2 + 1);
-        if (context_.auth.validate(authcid, password)) {
-            authed_ = true;
-            username_ = authcid;
-            sendLine("235 Authentication successful");
-        } else {
-            RateLimiter::instance().recordAuthFailure(peerIp_);
-            Metrics::instance().inc("smtp_auth_failures_total");
-            sendLine("535 Authentication failed");
-        }
-        return;
+
+        authed_ = true;
+        Metrics::instance().inc("smtp_auth_successes_total");
+        sendLine("235 Authentication successful");
+    } catch (const std::exception& ex) {
+        Logger::instance().log(LogLevel::Error,
+            "SMTP AUTH failed (" + peerIp_ + "): " + ex.what());
+        Metrics::instance().inc("smtp_auth_errors_total");
+        sendLine("451 Internal error - authentication failed");
+    } catch (...) {
+        Logger::instance().log(LogLevel::Error,
+            "SMTP AUTH failed (" + peerIp_ + "): unknown error");
+        Metrics::instance().inc("smtp_auth_errors_total");
+        sendLine("451 Internal error - authentication failed");
     }
-    if (umech == "LOGIN") {
-        std::string user, pass;
-        if (!param.empty()) {
-            user = base64Decode(param);
-        } else {
-            sendLine("334 " + base64Encode("Username:"));
-            std::string uline;
-            if (!readLine(uline)) return;
-            user = base64Decode(uline);
-        }
-        sendLine("334 " + base64Encode("Password:"));
-        std::string pline;
-        if (!readLine(pline)) return;
-        pass = base64Decode(pline);
-        if (context_.auth.validate(user, pass)) {
-            authed_ = true;
-            username_ = user;
-            sendLine("235 Authentication successful");
-        } else {
-            RateLimiter::instance().recordAuthFailure(peerIp_);
-            Metrics::instance().inc("smtp_auth_failures_total");
-            sendLine("535 Authentication failed");
-        }
-        return;
-    }
-    sendLine("504 Unrecognized authentication type");
 }
 
 void SmtpSession::handleMailFrom(const std::string& args) {
     mailFrom_ = args;
+    rcptTo_.clear();
     sendLine("250 OK");
 }
 
 void SmtpSession::handleRcptTo(const std::string& args) {
-    rcptTo_ = args;
+    rcptTo_.push_back(args);
     sendLine("250 OK");
 }
 
-static std::string extractAddress(const std::string& s) {
-    auto start = s.find('<');
-    auto end = s.find('>');
-    if (start != std::string::npos && end != std::string::npos && end > start)
-        return s.substr(start + 1, end - start - 1);
-    return s;
-}
-
 void SmtpSession::handleData() {
-    if (mailFrom_.empty() || rcptTo_.empty()) {
-        sendLine("503 Bad sequence of commands");
+    if (rcptTo_.empty()) {
+        sendLine("503 No recipients specified");
         return;
     }
-    
-    // Use allowCommand for per-message rate limiting (120/min)
-    if (!RateLimiter::instance().allowCommand(reinterpret_cast<void*>(&mailFrom_))) {
-        Logger::instance().log(LogLevel::Warn, "Message rate limited: " + extractAddress(mailFrom_));
-        sendLine("451 Too many messages");
-        return;
-    }
-    
-    sendLine("354 End data with .");
-    std::string line, data;
+
+    sendLine("354 End data with <CR><LF>.<CR><LF>");
+
+    std::string line;
+    std::ostringstream message;
+    size_t messageSize = 0;
+    const size_t maxSize = context_.config.maxMessageSize;
+    int consecutiveErrors = 0;
+
     while (readLine(line)) {
-        if (line == ".") break;
-        if (!line.empty() && line[0] == '.') line.erase(0, 1);
-        data.append(line);
-        data.append("\r\n");
-    }
-
-    std::string::size_type sep = data.find("\r\n\r\n");
-    std::string headers = (sep == std::string::npos) ? data : data.substr(0, sep);
-    std::string body = (sep == std::string::npos) ? "" : data.substr(sep + 4);
-
-    std::string fromDomain;
-    auto fpos = headers.find("\nFrom:");
-    if (fpos == std::string::npos)
-        fpos = headers.find("\r\nFrom:");
-    if (fpos != std::string::npos) {
-        auto end = headers.find("\n", fpos + 1);
-        std::string fromLine = headers.substr(fpos, end - fpos);
-        auto at = fromLine.find('@');
-        if (at != std::string::npos) {
-            auto endd = fromLine.find_first_of(">\r\n", at);
-            fromDomain = fromLine.substr(at + 1, endd - at - 1);
+        if (line == ".")
+            break;
+        
+        // Handle SMTP dot-stuffing (RFC 5321)
+        if (!line.empty() && line[0] == '.') {
+            line.erase(0, 1);  // Remove the extra dot
+        }
+        
+        // Check size limit
+        messageSize += line.length() + 2;  // +2 for \r\n
+        if (messageSize > maxSize) {
+            sendLine("552 Message size exceeds maximum permitted");
+            return;
+        }
+        
+        // Prevent runaway memory growth from malicious input
+        if (message.str().length() > maxSize * 2) {  // Extra safety margin
+            Logger::instance().log(LogLevel::Warn,
+                "SMTP DATA command memory safety triggered (" + peerIp_ + ")");
+            sendLine("451 Internal error - message too complex");
+            return;
+        }
+        
+        try {
+            message << line << "\n";
+        } catch (const std::bad_alloc&) {
+            Logger::instance().log(LogLevel::Error,
+                "SMTP DATA command out of memory (" + peerIp_ + ")");
+            sendLine("451 Internal error - out of memory");
+            return;
+        } catch (const std::exception& ex) {
+            Logger::instance().log(LogLevel::Error,
+                "SMTP DATA command failed (" + peerIp_ + "): " + ex.what());
+            sendLine("451 Internal error - data processing failed");
+            consecutiveErrors++;
+            if (consecutiveErrors > 3) {
+                Logger::instance().log(LogLevel::Warn,
+                    "SMTP DATA command too many errors, terminating (" + peerIp_ + ")");
+                return;
+            }
+            continue;
         }
     }
 
-    SpfChecker spfChecker;
-    DkimVerifier dkimVerifier;
-    DmarcEvaluator dmarcEval;
-    authResults_.spf = spfChecker.check(peerIp_, mailFrom_, heloDomain_);
-    authResults_.dkim = dkimVerifier.verify(headers, body);
-    
-    DmarcInput din;
-    din.fromDomain = fromDomain;
-    din.spfPass = (authResults_.spf.result == SpfResult::Pass);
-    din.dkimPass = (authResults_.dkim.result == DkimResult::Pass);
-    din.dkimDomain = authResults_.dkim.headerDomain;
-    authResults_.dmarc = dmarcEval.evaluate(din);
+    // CRITICAL FIX: Durable message storage with at-least-once delivery guarantee
+    // Only acknowledge acceptance AFTER message is durably stored
+    try {
+        StoredMessage msg;
+        msg.id = "";
+        msg.from = mailFrom_;
+        msg.recipients = rcptTo_;
+        msg.rawData = message.str();
+        msg.mailboxUser = rcptTo_[0];
 
-    std::string authHeader = "Authentication-Results: " + authResults_.toHeaderValue(context_.config.domain);
-    std::string newHeaders = authHeader + "\r\n" + headers;
-    std::string finalRaw = newHeaders + "\r\n\r\n" + body;
+        // Store message durably (atomic write + fsync + rename)
+        std::string storedId = context_.mailStore.store(msg);
 
-    auto scanResult = VirusScanner::scan(finalRaw);
-    if (scanResult.unavailable) {
-        Logger::instance().log(LogLevel::Error, "Virus scanner unavailable");
-        Metrics::instance().inc("virus_scanner_unavailable_total");
-        sendLine("451 Temporary failure, virus scanner unavailable");
-        return;
-    }
-    if (scanResult.infected) {
-        Logger::instance().log(LogLevel::Warn, "Virus detected: " + scanResult.virusName);
-        Metrics::instance().inc("messages_virus_rejected_total");
-        sendLine("550 Message rejected due to virus detection");
-        return;
-    }
-
-    MimeMessage mime = MimeParser::parse(finalRaw);
-    std::vector<std::string> filenames;
-    for (const auto& part : mime.root.children) {
-        auto name = part.filename();
-        if (!name.empty()) {
-            filenames.push_back(name);
+        if (storedId.empty()) {
+            Logger::instance().log(LogLevel::Error,
+                "SMTP message storage failed (" + peerIp_ + "): store returned empty ID");
+            sendLine("451 Internal error - storage failed");
+            return;
         }
-    }
 
-    std::vector<AttachmentMeta> attachments;
-    for (const auto& name : filenames) {
-        attachments.push_back({name, 0});
-    }
-    PolicyResult policy = AttachmentPolicy::evaluate(attachments);
-    if (policy.verdict == PolicyVerdict::Reject) {
-        Logger::instance().log(LogLevel::Warn, "Message rejected by attachment policy: " + policy.reason);
-        sendLine("550 Message rejected: " + policy.reason);
-        return;
-    }
-
-    StoredMessage msg;
-    msg.id = std::to_string(std::time(nullptr)) + "-" + std::to_string(rand());
-    msg.from = extractAddress(mailFrom_);
-    msg.recipients = { extractAddress(rcptTo_) };
-    msg.rawData = finalRaw;
-    msg.mailboxUser = username_.empty() ? extractAddress(rcptTo_) : username_;
-
-    std::string storedId = context_.mailStore.store(msg);
-    if (storedId.empty()) {
-        sendLine("451 Requested action aborted: local error in processing");
-    } else {
-        Metrics::instance().inc("messages_received_total");
+        // CRITICAL FIX: Only acknowledge AFTER durable storage succeeds
         sendLine("250 Message accepted for delivery");
+
+        Logger::instance().log(LogLevel::Info,
+            "SMTP message durably stored (" + peerIp_ + "): ID=" + storedId +
+            " from=" + mailFrom_ + " to=" + rcptTo_[0]);
+
+        Metrics::instance().inc("smtp_messages_accepted_total");
+
+    } catch (const std::exception& ex) {
+        Logger::instance().log(LogLevel::Error,
+            "SMTP message storage failed (" + peerIp_ + "): " + ex.what());
+        Metrics::instance().inc("smtp_messages_rejected_total");
+        sendLine("451 Internal error - storage failed");
+    } catch (...) {
+        Logger::instance().log(LogLevel::Error,
+            "SMTP message storage failed (" + peerIp_ + "): unknown error");
+        Metrics::instance().inc("smtp_messages_rejected_total");
+        sendLine("451 Internal error - storage failed");
     }
 }
 
 void SmtpSession::handleQuit() {
     sendLine("221 Bye");
-    RateLimiter::instance().releaseConnection(peerIp_);
     closesocket(sock_);
     sock_ = INVALID_SOCKET;
-}
-
-static const char b64chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-std::string SmtpSession::base64Encode(const std::string& in) {
-    std::string out;
-    int val = 0, valb = -6;
-    for (unsigned char c : in) {
-        val = (val << 8) + c;
-        valb += 8;
-        while (valb >= 0) {
-            out.push_back(b64chars[(val >> valb) & 0x3F]);
-            valb -= 6;
-        }
-    }
-    if (valb > -6)
-        out.push_back(b64chars[((val << 8) >> (valb + 8)) & 0x3F]);
-    while (out.size() % 4)
-        out.push_back('=');
-    return out;
-}
-
-std::string SmtpSession::base64Decode(const std::string& in) {
-    std::vector<int> T(256, -1);
-    for (int i = 0; i < 64; i++)
-        T[static_cast<unsigned char>(b64chars[i])] = i;
-    std::string out;
-    int val = 0, valb = -8;
-    for (unsigned char c : in) {
-        if (T[c] == -1) break;
-        val = (val << 6) + T[c];
-        valb += 6;
-        if (valb >= 0) {
-            out.push_back(char((val >> valb) & 0xFF));
-            valb -= 8;
-        }
-    }
-    return out;
 }

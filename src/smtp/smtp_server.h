@@ -45,4 +45,17 @@ private:
     std::mutex sessionsMutex_;
     std::vector<SOCKET> clientSockets_;
     std::mutex clientsMutex_;
+    
+    // Circuit breaker for fault isolation
+    std::atomic<int> recentFailures_{0};
+    std::atomic<std::chrono::steady_clock::time_point> lastFailureTime_;
+    static constexpr int FAILURE_THRESHOLD = 10;  // Failures per minute
+    static constexpr int CIRCUIT_BREAKER_TIMEOUT_MS = 30000;  // 30 seconds
+
+    bool isCircuitBreakerTripped() const;
+    void resetCircuitBreakerIfExpired();
+    void recordSessionFailure();
+    
+    // Cleanup finished threads periodically
+    void cleanupFinishedThreads();
 };

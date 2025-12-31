@@ -4,11 +4,38 @@
 #include <filesystem>
 #include <fstream>
 #include <chrono>
+#include <windows.h>
+#include <io.h>
 
 namespace fs = std::filesystem;
 
 MailStore::MailStore(const std::string& rootDir)
-    : rootDir_(rootDir) {}
+    : rootDir_(rootDir) {
+    // CRITICAL FIX: Recovery of orphaned temp files on startup
+    recoverOrphanedTempFiles();
+}
+
+void MailStore::recoverOrphanedTempFiles() {
+    try {
+        // Find and clean up any orphaned .tmp files from crashed writes
+        for (const auto& entry : fs::recursive_directory_iterator(rootDir_)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".tmp") {
+                try {
+                    fs::remove(entry.path());
+                    Logger::instance().log(LogLevel::Warn,
+                        "MailStore: Recovered orphaned temp file: " + entry.path().string());
+                } catch (const std::exception& ex) {
+                    Logger::instance().log(LogLevel::Error,
+                        "MailStore: Failed to remove orphaned temp file " + entry.path().string() +
+                        ": " + ex.what());
+                }
+            }
+        }
+    } catch (const std::exception& ex) {
+        Logger::instance().log(LogLevel::Error,
+            "MailStore: Error during temp file recovery: " + std::string(ex.what()));
+    }
+}
 
 std::string MailStore::generateId() const {
     using namespace std::chrono;
@@ -31,6 +58,58 @@ bool MailStore::ensureDirExists(const std::string& dir) const {
     } catch (...) {
         return false;
     }
+}
+
+// CRITICAL FIX: Atomic write with fsync for crash safety
+bool MailStore::atomicWriteFile(const std::string& path, const std::string& content) {
+    std::string tempPath = path + ".tmp";
+
+    // Write to temp file with fsync
+    HANDLE hFile = CreateFileA(tempPath.c_str(), GENERIC_WRITE, 0, NULL,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        Logger::instance().log(LogLevel::Error,
+            "MailStore: Failed to create temp file " + tempPath);
+        return false;
+    }
+
+    DWORD bytesWritten;
+    if (!WriteFile(hFile, content.data(), static_cast<DWORD>(content.size()), &bytesWritten, NULL) ||
+        bytesWritten != content.size()) {
+        Logger::instance().log(LogLevel::Error,
+            "MailStore: Failed to write to temp file " + tempPath);
+        CloseHandle(hFile);
+        DeleteFileA(tempPath.c_str());
+        return false;
+    }
+
+    // Flush to disk (fsync equivalent)
+    if (!FlushFileBuffers(hFile)) {
+        Logger::instance().log(LogLevel::Error,
+            "MailStore: Failed to flush temp file " + tempPath);
+        CloseHandle(hFile);
+        DeleteFileA(tempPath.c_str());
+        return false;
+    }
+
+    CloseHandle(hFile);
+
+    // Atomic rename
+    if (!MoveFileExA(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        Logger::instance().log(LogLevel::Error,
+            "MailStore: Failed to rename temp file " + tempPath + " to " + path);
+        DeleteFileA(tempPath.c_str());
+        return false;
+    }
+
+    // Verify final file exists
+    if (!fs::exists(path)) {
+        Logger::instance().log(LogLevel::Error,
+            "MailStore: Atomic write verification failed for " + path);
+        return false;
+    }
+
+    return true;
 }
 
 std::string MailStore::makeMessagePath(const std::string& user,
@@ -93,28 +172,29 @@ std::string MailStore::store(const StoredMessage& msg) {
     std::string id = msg.id.empty() ? generateId() : msg.id;
     std::string path = makeMessagePath(msg.mailboxUser, id);
 
-    std::ofstream out(path, std::ios::out | std::ios::binary);
-    if (!out) {
+    // CRITICAL FIX: Build message content
+    std::string content;
+    content.reserve(msg.rawData.size() + 1024); // Pre-allocate for efficiency
+
+    content += "From: " + msg.from + "\r\n";
+    for (const auto& rcpt : msg.recipients) {
+        content += "To: " + rcpt + "\r\n";
+    }
+    content += "Message-ID: <" + id + "@local>\r\n";
+    content += "\r\n";
+    content += msg.rawData;
+
+    // CRITICAL FIX: Atomic write with fsync for crash safety
+    if (!atomicWriteFile(path, content)) {
         Logger::instance().log(
             LogLevel::Error,
-            "MailStore: cannot open file " + path);
+            "MailStore: atomic write failed for message " + id);
         return {};
     }
 
-    // Simple RFC5322-like message
-    out << "From: " << msg.from << "\r\n";
-    for (const auto& rcpt : msg.recipients) {
-        out << "To: " << rcpt << "\r\n";
-    }
-    out << "Message-ID: <" << id << "@local>\r\n";
-    out << "\r\n";
-    out << msg.rawData;
-
-    out.close();
-
     Logger::instance().log(
         LogLevel::Info,
-        "MailStore: stored message " + id +
+        "MailStore: durably stored message " + id +
         " for user " + msg.mailboxUser +
         " at " + path);
 

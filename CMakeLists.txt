@@ -25,6 +25,7 @@ add_executable(mailserver
     src/imap/imap_server.cpp
     src/imap/imap_session.cpp
     src/core/auth_manager.cpp
+    src/core/distributed_auth_manager.cpp
     src/core/rate_limiter.cpp
     src/imap/flags_index.cpp
     src/antispam/dkim_canon.cpp
@@ -36,6 +37,7 @@ add_executable(mailserver
     src/antispam/spf_parser.cpp
     src/queue/mail_queue.cpp
     src/queue/retry_worker.cpp
+    src/delivery/smtp_client.cpp
     src/dns/dns_resolver.cpp
     src/dns/dns_packet.cpp
     src/spam/spam_engine.cpp
@@ -60,6 +62,7 @@ add_executable(mailserver
     src/virus/cloud_scan_worker.cpp
     src/virus/virus_verdict_store.cpp
     src/retro/retro_manager.cpp
+    src/core/base64.cpp
     src/threat_intel/hash_reputation.cpp
     src/threat_intel/intel_feedback.cpp
     src/threat_intel/ioc_store.cpp
@@ -83,8 +86,8 @@ if(WIN32)
 endif()
 
 # yaml-cpp + json (unchanged)
-find_package(yaml-cpp REQUIRED)
-target_link_libraries(mailserver PRIVATE yaml-cpp)
+find_package(yaml-cpp CONFIG REQUIRED)
+target_link_libraries(mailserver PRIVATE yaml-cpp::yaml-cpp)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -93,3 +96,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 target_link_libraries(mailserver PRIVATE nlohmann_json::nlohmann_json)
+
+# hiredis (Redis client library for distributed auth) - commented out for compatibility
+# FetchContent_Declare(
+#     hiredis
+#     GIT_REPOSITORY https://github.com/redis/hiredis.git
+#     GIT_TAG v1.1.0
+# )
+# FetchContent_MakeAvailable(hiredis)
+# target_link_libraries(mailserver PRIVATE hiredis)

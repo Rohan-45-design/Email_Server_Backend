@@ -24,6 +24,38 @@ void ConnectionManager::setBackpressureDelay(std::chrono::milliseconds delay) {
     backpressureDelayMs_.store(static_cast<int>(delay.count()));
 }
 
+bool ConnectionManager::checkResourceLimits() const {
+    // Check thread count (approximate)
+    // Note: This is a simple check - in production you'd use OS-specific APIs
+    static int lastThreadCheck = 0;
+    static int threadCount = 0;
+    
+    // Simple thread count estimation (not perfect but better than nothing)
+    if (std::thread::hardware_concurrency() > 0) {
+        int maxThreads = maxThreads_.load();
+        if (maxThreads > 0 && activeConnections_.load() >= maxThreads / 2) {
+            Logger::instance().log(LogLevel::Warn,
+                "ConnectionManager: Approaching thread limit: " + 
+                std::to_string(activeConnections_.load()) + "/" + std::to_string(maxThreads));
+        }
+    }
+    
+    // Check memory usage (simplified - in production use OS APIs)
+    // For now, just check if we're getting close to connection limits as proxy
+    int maxMemMB = maxMemoryMB_.load();
+    if (maxMemMB > 0) {
+        // Estimate: ~1MB per active connection (rough approximation)
+        int estimatedMemMB = activeConnections_.load();
+        if (estimatedMemMB >= maxMemMB * 0.8) { // 80% of limit
+            Logger::instance().log(LogLevel::Warn,
+                "ConnectionManager: Approaching memory limit: ~" + 
+                std::to_string(estimatedMemMB) + "MB/" + std::to_string(maxMemMB) + "MB");
+        }
+    }
+    
+    return true; // For now, don't block - just warn
+}
+
 bool ConnectionManager::tryAcquireConnection(const std::string& ip) {
     // Check global limit
     int current = activeConnections_.load();

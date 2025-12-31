@@ -2,56 +2,60 @@
 
 #include <functional>
 #include <vector>
-#include <memory>
 #include <string>
+#include <mutex>
 #include <atomic>
 
-/**
- * Application Lifecycle Manager
- * 
- * WHY REQUIRED:
- * - Enforces deterministic startup order (critical subsystems first)
- * - Fail-fast behavior: abort on init errors instead of partial startup
- * - Clear ownership: each subsystem registers its init/shutdown
- * - Prevents race conditions during startup/shutdown
- */
 class AppLifecycle {
 public:
     enum class Phase {
-        Config,      // Load and validate configuration
-        Logging,     // Initialize logging
-        TLS,         // Initialize TLS context
-        Storage,     // Initialize data stores
-        Services,    // Start background services (virus scanning, etc.)
-        Servers      // Start network servers (SMTP/IMAP/Admin)
+        Config,
+        Logging,
+        TLS,
+        Storage,
+        Services,
+        Servers
+    };
+
+    enum class State {
+        Starting,
+        Ready,
+        Stopping,
+        Stopped
     };
 
     struct Subsystem {
         std::string name;
         Phase phase;
-        std::function<bool()> init;      // Returns false on failure
-        std::function<void()> shutdown;  // Called in reverse order
-        int shutdownOrder = 0;            // Lower = shutdown first
+        int shutdownOrder = 0;   // Higher = shutdown earlier
+
+        std::function<bool()> init;     // return false on failure
+        std::function<void()> shutdown; // must not throw
     };
 
     static AppLifecycle& instance();
 
-    // Register a subsystem with its lifecycle hooks
+    // Must be called before initialize()
     void registerSubsystem(const Subsystem& subsystem);
 
-    // Initialize all subsystems in phase order (fail-fast)
+    // Fail-fast initialization
     bool initialize();
 
-    // Shutdown all subsystems in reverse order
+    // Safe to call from any thread
     void shutdown();
 
-    // Check if initialization completed successfully
-    bool isInitialized() const { return initialized_; }
+    State state() const;
 
 private:
     AppLifecycle() = default;
-    std::vector<Subsystem> subsystems_;
-    std::atomic<bool> initialized_{false};
-    std::atomic<bool> shuttingDown_{false};
-};
+    AppLifecycle(const AppLifecycle&) = delete;
+    AppLifecycle& operator=(const AppLifecycle&) = delete;
 
+private:
+    mutable std::mutex mutex_;
+
+    std::vector<Subsystem> subsystems_;
+    std::vector<const Subsystem*> initialized_; // only those successfully started
+
+    std::atomic<State> state_{State::Stopped};
+};

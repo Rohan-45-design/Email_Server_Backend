@@ -38,6 +38,13 @@ HealthStatus Health::check() {
     try {
         auto space = fs::space("data");
         double free_gb = static_cast<double>(space.free) / (1024 * 1024 * 1024);
+        double total_gb = static_cast<double>(space.capacity) / (1024 * 1024 * 1024);
+        double used_gb = total_gb - free_gb;
+        
+        // Set disk usage metrics
+        Metrics::instance().set("disk_free_bytes", static_cast<int64_t>(space.free));
+        Metrics::instance().set("disk_total_bytes", static_cast<int64_t>(space.capacity));
+        
         if (free_gb < 1.0) { // Less than 1GB free
             s.ok = false;
             issues << "Low disk space: " << std::fixed << std::setprecision(2) 

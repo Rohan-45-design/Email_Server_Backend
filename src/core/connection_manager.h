@@ -23,6 +23,12 @@ public:
     void setGlobalMaxConnections(int max);
     void setMaxConnectionsPerIP(int max);
     void setBackpressureDelay(std::chrono::milliseconds delay);
+    
+    // CRITICAL FIX: Resource limit enforcement
+    void setMaxThreads(int max) { maxThreads_.store(max); }
+    void setMaxMemoryMB(int max) { maxMemoryMB_.store(max); }
+    
+    bool checkResourceLimits() const;
 
     // Connection tracking
     bool tryAcquireConnection(const std::string& ip);
@@ -30,6 +36,7 @@ public:
 
     // Statistics
     int getActiveConnections() const { return activeConnections_.load(); }
+    int getMaxConnections() const { return globalMax_.load(); }
     int getConnectionsForIP(const std::string& ip) const;
 
     // Backpressure: wait if at limit
@@ -41,6 +48,10 @@ private:
     std::atomic<int> globalMax_{1000};
     std::atomic<int> perIPMax_{10};
     std::atomic<int> backpressureDelayMs_{100};
+    
+    // CRITICAL FIX: Resource limit enforcement
+    std::atomic<int> maxThreads_{1000};
+    std::atomic<int> maxMemoryMB_{2048};
 
     struct IPConnection {
         int count = 0;

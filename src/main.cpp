@@ -2,6 +2,7 @@
 #include "core/server_context.h"
 #include "core/logger.h"
 #include "core/tls_context.h"
+#include "core/tls_enforcement.h"
 #include "smtp/smtp_server.h"
 #include "imap/imap_server.h"
 #include <iostream>
@@ -82,11 +83,6 @@ int main() {
 
         // 5) Build shared server context (includes MailStore)
         ServerContext ctx(cfg);
-        if (!ctx.auth.load(cfg.usersFile)) {
-            Logger::instance().log(
-                LogLevel::Warn,
-                "AuthManager: continuing without valid users file");
-        }
 
         // 6) Initialize TLS context (fail-fast)
         // Allow env override for cert/key
@@ -103,8 +99,21 @@ int main() {
                 Logger::instance().log(LogLevel::Error, "TLS initialization failed — aborting startup");
                 return 2;
             }
+            Logger::instance().log(LogLevel::Info, "TLS initialized successfully");
         } else {
-            Logger::instance().log(LogLevel::Warn, "TLS certificate/key not provided — continuing without TLS");
+            Logger::instance().log(LogLevel::Warn, "TLS certificate/key not provided — TLS features disabled");
+        }
+
+        // CRITICAL: Configure TLS enforcement based on config
+        // This ensures AUTH requires TLS even if TLS certs are not available
+        TlsEnforcement::instance().setTlsRequired(cfg.tlsRequired);
+        TlsEnforcement::instance().setMinTlsVersion(cfg.minTlsVersion);
+        TlsEnforcement::instance().setRequireStartTls(cfg.requireStartTls);
+
+        // If TLS is required but not configured, fail startup
+        if (cfg.tlsRequired && (cert.empty() || key.empty())) {
+            Logger::instance().log(LogLevel::Error, "TLS required but certificate/key not configured — aborting startup");
+            return 2;
         }
 
         // 7) Start monitoring and admin servers

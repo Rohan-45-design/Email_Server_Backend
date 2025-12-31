@@ -1,5 +1,6 @@
 #include "app_lifecycle.h"
 #include "logger.h"
+
 #include <algorithm>
 #include <stdexcept>
 
@@ -9,93 +10,115 @@ AppLifecycle& AppLifecycle::instance() {
 }
 
 void AppLifecycle::registerSubsystem(const Subsystem& subsystem) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (state_ != State::Stopped) {
+        throw std::logic_error(
+            "AppLifecycle: Cannot register subsystem after initialization started");
+    }
+
     subsystems_.push_back(subsystem);
-    // Sort by phase order
+
+    // Ensure deterministic startup order by phase
     std::sort(subsystems_.begin(), subsystems_.end(),
         [](const Subsystem& a, const Subsystem& b) {
-            return static_cast<int>(a.phase) < static_cast<int>(b.phase);
+            return static_cast<int>(a.phase) <
+                   static_cast<int>(b.phase);
         });
 }
 
 bool AppLifecycle::initialize() {
-    if (initialized_) {
-        Logger::instance().log(LogLevel::Warn, "AppLifecycle: Already initialized");
-        return true;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (state_ != State::Stopped) {
+        Logger::instance().log(LogLevel::Warn,
+            "AppLifecycle: initialize() called more than once");
+        return false;
     }
 
-    Logger::instance().log(LogLevel::Info, "AppLifecycle: Starting initialization");
+    state_ = State::Starting;
+    Logger::instance().log(LogLevel::Info,
+        "AppLifecycle: Starting initialization");
 
-    Phase currentPhase = Phase::Config;
     for (auto& subsystem : subsystems_) {
-        // Log phase transitions
-        if (subsystem.phase != currentPhase) {
-            Logger::instance().log(LogLevel::Info, 
-                "AppLifecycle: Entering phase " + std::to_string(static_cast<int>(subsystem.phase)));
-            currentPhase = subsystem.phase;
-        }
-
-        Logger::instance().log(LogLevel::Info, 
-            "AppLifecycle: Initializing " + subsystem.name);
+        Logger::instance().log(LogLevel::Info,
+            "Initializing subsystem: " + subsystem.name);
 
         try {
             if (!subsystem.init()) {
                 Logger::instance().log(LogLevel::Error,
-                    "AppLifecycle: FAIL-FAST: " + subsystem.name + " initialization failed");
-                // Shutdown already initialized subsystems in reverse order
+                    "Initialization failed: " + subsystem.name);
                 shutdown();
                 return false;
             }
-        } catch (const std::exception& ex) {
+
+            // Track only successfully initialized subsystems
+            initialized_.push_back(&subsystem);
+
+        } catch (const std::exception& e) {
             Logger::instance().log(LogLevel::Error,
-                "AppLifecycle: FAIL-FAST: Exception in " + subsystem.name + ": " + ex.what());
+                "Exception during init of " + subsystem.name + ": " + e.what());
             shutdown();
             return false;
         } catch (...) {
             Logger::instance().log(LogLevel::Error,
-                "AppLifecycle: FAIL-FAST: Unknown exception in " + subsystem.name);
+                "Unknown exception during init of " + subsystem.name);
             shutdown();
             return false;
         }
     }
 
-    initialized_ = true;
-    Logger::instance().log(LogLevel::Info, "AppLifecycle: Initialization complete");
+    state_ = State::Ready;
+    Logger::instance().log(LogLevel::Info,
+        "AppLifecycle: Initialization complete");
+
     return true;
 }
 
 void AppLifecycle::shutdown() {
-    if (shuttingDown_) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (state_ == State::Stopping || state_ == State::Stopped) {
         return;
     }
-    shuttingDown_ = true;
 
-    Logger::instance().log(LogLevel::Info, "AppLifecycle: Starting shutdown");
+    state_ = State::Stopping;
+    Logger::instance().log(LogLevel::Info,
+        "AppLifecycle: Starting shutdown");
 
-    // Shutdown in reverse order (highest shutdownOrder first)
-    std::vector<Subsystem> sorted = subsystems_;
-    std::sort(sorted.begin(), sorted.end(),
-        [](const Subsystem& a, const Subsystem& b) {
-            return a.shutdownOrder > b.shutdownOrder;
+    // Shutdown only initialized subsystems, in reverse dependency order
+    std::sort(initialized_.begin(), initialized_.end(),
+        [](const Subsystem* a, const Subsystem* b) {
+            return a->shutdownOrder > b->shutdownOrder;
         });
 
-    for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
-        Logger::instance().log(LogLevel::Info, 
-            "AppLifecycle: Shutting down " + it->name);
+    for (const Subsystem* subsystem : initialized_) {
+        if (!subsystem->shutdown) {
+            continue;
+        }
+
+        Logger::instance().log(LogLevel::Info,
+            "Shutting down subsystem: " + subsystem->name);
+
         try {
-            if (it->shutdown) {
-                it->shutdown();
-            }
-        } catch (const std::exception& ex) {
+            subsystem->shutdown();
+        } catch (const std::exception& e) {
             Logger::instance().log(LogLevel::Error,
-                "AppLifecycle: Error shutting down " + it->name + ": " + ex.what());
+                "Shutdown error in " + subsystem->name + ": " + e.what());
         } catch (...) {
             Logger::instance().log(LogLevel::Error,
-                "AppLifecycle: Unknown error shutting down " + it->name);
+                "Unknown shutdown error in " + subsystem->name);
         }
     }
 
+    initialized_.clear();
     subsystems_.clear();
-    initialized_ = false;
-    Logger::instance().log(LogLevel::Info, "AppLifecycle: Shutdown complete");
+
+    state_ = State::Stopped;
+    Logger::instance().log(LogLevel::Info,
+        "AppLifecycle: Shutdown complete");
 }
 
+AppLifecycle::State AppLifecycle::state() const {
+    return state_.load();
+}
