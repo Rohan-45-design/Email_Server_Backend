@@ -22,8 +22,8 @@ struct ServerConfig {
     std::string tlsKeyFile;  // path to TLS private key (PEM)
     bool tlsRequired = false;        // Require TLS for all connections
     bool requireStartTls = false;    // Require STARTTLS for submission (port 587)
-    int minTlsVersion = 0x0303;      // Minimum TLS version (TLS1_2_VERSION)
-
+    int minTlsVersion = -1;     // Minimum TLS version (1=TLS1.0, 2=TLS1.1, 3=TLS1.2+)
+    bool hasMinTlsVersion = false;
     // SMTP-specific limits
     size_t maxMessageSize = 10485760;  // 10MB max message size
     int smtpTimeout = 300;             // 5 minutes default timeout

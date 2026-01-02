@@ -14,9 +14,22 @@ void TlsEnforcement::setTlsRequired(bool required) {
 }
 
 void TlsEnforcement::setMinTlsVersion(int version) {
-    minTlsVersion_ = version;
+    if (version == 0) {
+        throw std::runtime_error("min_tls_version not configured or invalid");
+    }
+    switch (version) {
+        case 1: minTlsVersion_ = TLS1_VERSION; break;
+        case 2: minTlsVersion_ = TLS1_1_VERSION; break;
+        case 3: minTlsVersion_ = TLS1_2_VERSION; break;
+        default:
+            Logger::instance().log(LogLevel::Error,
+                "Invalid min_tls_version: " + std::to_string(version));
+            throw std::runtime_error(
+                "server.min_tls_version must be 1 (TLS 1.0), 2 (TLS 1.1), or 3 (TLS 1.2+)"
+            );
+    }
     Logger::instance().log(LogLevel::Info,
-        "TlsEnforcement: Minimum TLS version set");
+        "TlsEnforcement: Minimum TLS version set to " + std::to_string(minTlsVersion_));
 }
 
 void TlsEnforcement::setRequireStartTls(bool require) {
@@ -27,6 +40,10 @@ void TlsEnforcement::setRequireStartTls(bool require) {
 
 bool TlsEnforcement::validateTlsConnection(void* ssl) const {
     if (!ssl) return false;
+    if (minTlsVersion_ == 0) {
+        Logger::instance().log(LogLevel::Error, "TlsEnforcement: min_tls_version not configured");
+        return false;
+    }
 
     SSL* ssl_ptr = static_cast<SSL*>(ssl);
     int version = SSL_version(ssl_ptr);

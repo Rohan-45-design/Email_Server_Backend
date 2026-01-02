@@ -37,11 +37,6 @@ data/mail/
 data/*.db
 data/*.sqlite
 
-# Config files with secrets (keep example files)
-config/server.yml
-config/users.yml
-!config/example.server.yml
-
 # Environment files
 .env
 .env.local

@@ -1,0 +1,5 @@
+users:
+  rohan:
+    password: "$pbkdf2-sha256$100000$j6RyR3kBU4iEEDArEYY5Fg==$1c8B/XzYvzDsTjb9HNgSwixgw5qnvwASy3HmN2LPogA="
+  alice:
+    password: "$pbkdf2-sha256$100000$O7UTcnf9LD79n4HyEZzGIQ==$ECljjK8aXfo8uu8UZ5QjgUXl5a29ei78B1OkbcVOcP0="

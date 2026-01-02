@@ -1,6 +1,7 @@
 #include "core/config_loader.h"
 #include "core/logger.h"
-
+#include "core/tls_enforcement.h"
+#include <vector>
 #include <yaml-cpp/yaml.h>
 #include <stdexcept>
 
@@ -21,7 +22,10 @@ ServerConfig ConfigLoader::loadFromFile(const std::string& path) {
             if (s["tls_key"])    cfg.tlsKeyFile  = s["tls_key"].as<std::string>();
             if (s["tls_required"]) cfg.tlsRequired = s["tls_required"].as<bool>();
             if (s["require_starttls"]) cfg.requireStartTls = s["require_starttls"].as<bool>();
-            if (s["min_tls_version"]) cfg.minTlsVersion = s["min_tls_version"].as<int>();
+            if (s["min_tls_version"]){
+                cfg.minTlsVersion = s["min_tls_version"].as<int>();
+                cfg.hasMinTlsVersion = true;
+            } 
         }
 
         if (root["logging"]) {
@@ -66,7 +70,9 @@ ServerConfig ConfigLoader::loadFromFile(const std::string& path) {
 
     // Validate configuration
     validateConfig(cfg);
-
+    TlsEnforcement::instance().setMinTlsVersion(cfg.minTlsVersion);
+    TlsEnforcement::instance().setTlsRequired(cfg.tlsRequired);
+    TlsEnforcement::instance().setRequireStartTls(cfg.requireStartTls);
     return cfg;
 }
 
@@ -100,9 +106,12 @@ void ConfigLoader::validateConfig(const ServerConfig& cfg) {
     }
 
     // TLS version validation
-    if (cfg.minTlsVersion < 1 || cfg.minTlsVersion > 3) {
+    if (!cfg.hasMinTlsVersion) {
+        errors.push_back("server.min_tls_version is required");
+    } else if (cfg.minTlsVersion < 1 || cfg.minTlsVersion > 3) {
         errors.push_back("server.min_tls_version must be 1 (TLS 1.0), 2 (TLS 1.1), or 3 (TLS 1.2+)");
     }
+
 
     // SMTP limits validation
     if (cfg.maxMessageSize < 1024) {

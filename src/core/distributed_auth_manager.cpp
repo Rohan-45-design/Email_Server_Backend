@@ -241,7 +241,8 @@ bool DistributedAuthManager::loadFromFile(const std::string& path) {
 
         for (const auto& user : config["users"]) {
             std::string username = user.first.as<std::string>();
-            std::string password = user.second.as<std::string>();
+            if (!user.second["password"]) continue;
+            std::string password = user.second["password"].as<std::string>();
             std::string hashedPassword = hashPassword(password);
 
             if (!addUser(username, hashedPassword)) {

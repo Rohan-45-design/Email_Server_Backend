@@ -1,0 +1,35 @@
+server:
+  host: "0.0.0.0"
+  smtp_port: 25      # Standard SMTP port (requires root/CAP_NET_BIND_SERVICE in containers)
+  imap_port: 143     # Standard IMAP port
+  domain: "example.com"  # CHANGE THIS to your actual domain
+  mail_root: "data/mail"
+  tls_required: false       # Require TLS for AUTH and sensitive operations (set to true in production)
+  require_starttls: true    # Require STARTTLS for AUTH (makes AUTH impossible without TLS)
+  min_tls_version: 0
+
+smtp:
+  max_message_size: 10485760  # 10MB maximum message size
+  timeout: 300                # 5 minutes default timeout
+  data_timeout: 600           # 10 minutes for DATA mode
+
+logging:
+  file: "mailserver.log"
+  level: "info"
+
+auth:
+  users_file: "config/users.yml"
+
+ha:
+  enabled: true              # Enable distributed authentication for multi-node HA
+  redis_host: "localhost"     # Redis server host for session/auth replication
+  redis_port: 6379            # Redis server port
+  redis_password: ""          # Redis authentication password (leave empty if no auth)
+  cluster_id: "email-cluster" # Unique identifier for this email server cluster
+  node_id: ""                 # Unique node identifier (auto-generated if empty)
+
+admin:
+  token: "CHANGE_ME_SUPER_SECRET"
+
+rate_limits:
+  global_max_connections: 100  # IMAP global limit

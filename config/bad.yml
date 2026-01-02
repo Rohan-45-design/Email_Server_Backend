@@ -1,0 +1,35 @@
+server:
+  host: "0.0.0.0"
+  smtp_port: 25
+  imap_port: 143
+  domain: "example.com"
+  mail_root: "data/mail"
+  tls_required: false
+  require_starttls: true
+  min_tls_version: 0
+
+smtp:
+  max_message_size: 10485760
+  timeout: 300
+  data_timeout: 600
+
+logging:
+  file: "mailserver.log"
+  level: "info"
+
+auth:
+  users_file: "config/users.yml"
+
+ha:
+  enabled: true
+  redis_host: "localhost"
+  redis_port: 6379
+  redis_password: ""
+  cluster_id: "email-cluster"
+  node_id: ""
+
+admin:
+  token: "CHANGE_ME_SUPER_SECRET"
+
+rate_limits:
+  global_max_connections: 100

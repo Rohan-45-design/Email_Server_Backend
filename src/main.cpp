@@ -24,10 +24,13 @@
 std::atomic<bool> g_running{true};
 
 void signalHandler(int signal) {
-    Logger::instance().log(LogLevel::Info, "Received signal " + std::to_string(signal) + ", shutting down gracefully...");
+    Logger::instance().log(
+        LogLevel::Info,
+        "Received signal " + std::to_string(signal) + ", shutting down gracefully..."
+    );
     g_running = false;
 }
-// If you have a helper to convert "info"/"debug" strings to LogLevel
+
 LogLevel logLevelFromString(const std::string& s) {
     if (s == "debug")   return LogLevel::Debug;
     if (s == "info")    return LogLevel::Info;
@@ -38,22 +41,33 @@ LogLevel logLevelFromString(const std::string& s) {
 
 int main() {
     try {
-        // Register signal handlers for graceful shutdown
+        // Register signal handlers
         std::signal(SIGINT, signalHandler);
         std::signal(SIGTERM, signalHandler);
 #ifndef _WIN32
         std::signal(SIGHUP, signalHandler);
 #endif
 
-        // 1) Load configuration from YAML: config/server.yml or /app/config/server.yml (for containers)
+        // Parse command-line args
         std::string configPath = "config/server.yml";
+        for (int i = 1; i < __argc; ++i) {
+            std::string arg = __argv[i];
+            if (arg == "--config" && i + 1 < __argc) {
+                configPath = __argv[i + 1];
+                ++i;
+            }
+        }
+
+        // Env override
         const char* envConfig = std::getenv("CONFIG_PATH");
         if (envConfig) {
             configPath = envConfig;
         }
+
+        // 1️⃣ Load + validate config (TLS POLICY IS APPLIED HERE)
         ServerConfig cfg = ConfigLoader::loadFromFile(configPath);
 
-        // Validate critical config
+        // Extra safety checks
         if (cfg.domain.empty()) {
             Logger::instance().log(LogLevel::Error, "Configuration error: domain is required");
             return 1;
@@ -63,16 +77,16 @@ int main() {
             return 1;
         }
 
-        // 2) Initialize logging from config
+        // 2️⃣ Init logging
         Logger::instance().setFile(cfg.logFile);
         Logger::instance().setLevel(logLevelFromString(cfg.logLevel));
 
-        // 3) Set admin token (allow env override)
+        // 3️⃣ Admin auth
         const char* envAdminToken = std::getenv("ADMIN_TOKEN");
         std::string adminToken = envAdminToken ? envAdminToken : cfg.adminToken;
         AdminAuth::setToken(adminToken);
 
-        // 4) Initialize virus scanning providers
+        // 4️⃣ Virus scanning
         CloudScanner::instance().addProvider(
             std::make_unique<VirusTotalProvider>()
         );
@@ -81,47 +95,53 @@ int main() {
         );
         SandboxEngine::instance().start();
 
-        // 5) Build shared server context (includes MailStore)
+        // 5️⃣ Server context
         ServerContext ctx(cfg);
 
-        // 6) Initialize TLS context (fail-fast)
-        // Allow env override for cert/key
+        // 6️⃣ TLS TRANSPORT INIT (cert/key only)
         const char* envCert = std::getenv("TLS_CERT");
         const char* envKey  = std::getenv("TLS_KEY");
         const char* envCertPath = std::getenv("TLS_CERT_PATH");
         const char* envKeyPath = std::getenv("TLS_KEY_PATH");
-        
-        std::string cert = envCert ? envCert : (envCertPath ? envCertPath : cfg.tlsCertFile);
-        std::string key  = envKey  ? envKey  : (envKeyPath ? envKeyPath : cfg.tlsKeyFile);
+
+        std::string cert = envCert ? envCert :
+                           (envCertPath ? envCertPath : cfg.tlsCertFile);
+        std::string key  = envKey  ? envKey  :
+                           (envKeyPath  ? envKeyPath  : cfg.tlsKeyFile);
 
         if (!cert.empty() && !key.empty()) {
             if (!TlsContext::instance().init(cert, key)) {
-                Logger::instance().log(LogLevel::Error, "TLS initialization failed — aborting startup");
+                Logger::instance().log(
+                    LogLevel::Error,
+                    "TLS initialization failed — aborting startup"
+                );
                 return 2;
             }
             Logger::instance().log(LogLevel::Info, "TLS initialized successfully");
         } else {
-            Logger::instance().log(LogLevel::Warn, "TLS certificate/key not provided — TLS features disabled");
+            Logger::instance().log(
+                LogLevel::Warn,
+                "TLS certificate/key not provided — TLS features disabled"
+            );
         }
 
-        // CRITICAL: Configure TLS enforcement based on config
-        // This ensures AUTH requires TLS even if TLS certs are not available
-        TlsEnforcement::instance().setTlsRequired(cfg.tlsRequired);
-        TlsEnforcement::instance().setMinTlsVersion(cfg.minTlsVersion);
-        TlsEnforcement::instance().setRequireStartTls(cfg.requireStartTls);
+        // ❗ IMPORTANT
+        // ❗ DO NOT reapply TLS enforcement here
+        // ❗ It is already validated + applied in ConfigLoader
 
-        // If TLS is required but not configured, fail startup
         if (cfg.tlsRequired && (cert.empty() || key.empty())) {
-            Logger::instance().log(LogLevel::Error, "TLS required but certificate/key not configured — aborting startup");
+            Logger::instance().log(
+                LogLevel::Error,
+                "TLS required but certificate/key not configured — aborting startup"
+            );
             return 2;
         }
 
-        // 7) Start monitoring and admin servers
+        // 7️⃣ Metrics + admin servers
         HttpMetricsServer metrics;
         metrics.start(9090);
 
         AdminServer admin;
-        // Use port 8080 for admin API (matches docker-compose healthcheck)
         admin.start(8080);
 
         Logger::instance().log(LogLevel::Info, "Mailserver starting up");
@@ -132,20 +152,23 @@ int main() {
             " IMAP=" + std::to_string(cfg.imapPort)
         );
 
-        // 8) Start SMTP and IMAP servers
+        // 8️⃣ SMTP / IMAP
         SmtpServer smtp(ctx, cfg.smtpPort);
         ImapServer imap(ctx, cfg.imapPort);
         smtp.start();
         imap.start();
-        
-        Logger::instance().log(LogLevel::Info, "Mailserver running. Waiting for shutdown signal...");
 
-        // 9) Wait for shutdown signal (container-friendly)
+        Logger::instance().log(
+            LogLevel::Info,
+            "Mailserver running. Waiting for shutdown signal..."
+        );
+
+        // 9️⃣ Wait loop
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        // 10) Stop servers cleanly
+        // 🔟 Shutdown
         Logger::instance().log(LogLevel::Info, "Shutting down servers...");
         smtp.stop();
         imap.stop();
@@ -156,7 +179,7 @@ int main() {
     }
     catch (const std::exception& ex) {
         std::cerr << "Fatal error: " << ex.what() << std::endl;
-        Logger::instance().log(LogLevel::Error, "Fatal error: " + std::string(ex.what()));
+        Logger::instance().log(LogLevel::Error, ex.what());
         return 1;
     }
 

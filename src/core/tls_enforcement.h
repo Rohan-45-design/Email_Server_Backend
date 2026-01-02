@@ -34,6 +34,6 @@ private:
     TlsEnforcement() = default;
     bool tlsRequired_ = false;
     bool requireStartTls_ = false;
-    int minTlsVersion_ = 0x0303; // TLS 1.2
+    int minTlsVersion_ = 0; // Invalid default, must be set explicitly
 };
 
